@@ -1,0 +1,861 @@
+// Mo3ty RSI Engine dashboard. Vanilla JS + canvas; polls /api/state every few seconds.
+
+const POLL_MS = 3000;
+const TF_MS = 15 * 60 * 1000;
+const RING_C = 2 * Math.PI * 27; // circumference of the countdown ring
+const C = {
+  green: '#34d399',
+  red: '#f87171',
+  pink: '#f472b6',
+  lime: '#a3e635',
+  amber: '#fbbf24',
+  cyan: '#22d3ee',
+  violet: '#a78bfa',
+  blue: '#60a5fa',
+  text: '#e6ebff',
+  muted: '#8b95c4',
+  grid: 'rgba(129,140,248,0.10)',
+};
+
+const ui = {
+  snap: null,
+  symbol: null,
+  sigFilter: 'ALL',
+  offsetMs: 0,
+  hoverIdx: null,
+  lastOk: 0,
+  candleLayout: null,
+};
+
+const $ = (sel) => document.querySelector(sel);
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
+
+function fmtPrice(v) {
+  if (!isNum(v)) return '—';
+  const a = Math.abs(v);
+  const d = a >= 1000 ? 2 : a >= 10 ? 3 : a >= 1 ? 4 : 6;
+  return v.toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
+}
+function fmtUsd(v, signed = false) {
+  if (!isNum(v)) return '—';
+  const s = Math.abs(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  if (!signed) return `${v < 0 ? '-' : ''}$${s}`;
+  return `${v > 0 ? '+' : v < 0 ? '-' : ''}$${s}`;
+}
+function fmtPct(v, signed = false, d = 2) {
+  if (!isNum(v)) return '—';
+  return `${signed && v > 0 ? '+' : ''}${v.toFixed(d)}%`;
+}
+function fmtNum(v, d = 2) {
+  if (!isNum(v)) return '—';
+  return v.toFixed(d);
+}
+function hms(t) {
+  return new Date(t).toLocaleTimeString('en-GB', { hour12: false, timeZone: 'UTC' });
+}
+function dt(t) {
+  if (!t) return '—';
+  const d = new Date(t);
+  return d.toLocaleString('en-GB', { hour12: false, timeZone: 'UTC', month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+}
+function ago(t) {
+  if (!t) return '—';
+  const s = Math.max(0, Math.round((Date.now() - ui.offsetMs - t) / 1000));
+  if (s < 60) return `${s}s ago`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+  return `${Math.floor(s / 86400)}d ago`;
+}
+const clsPnl = (v) => (v > 0 ? 'pos' : v < 0 ? 'neg' : '');
+
+// ---------- data polling ----------
+async function poll() {
+  try {
+    const res = await fetch('/api/state', { cache: 'no-store' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const snap = await res.json();
+    ui.snap = snap;
+    ui.offsetMs = Date.now() - snap.generatedAt;
+    ui.lastOk = Date.now();
+    render();
+  } catch (err) {
+    showConnectionError(err);
+  } finally {
+    setTimeout(poll, POLL_MS);
+  }
+}
+
+function showConnectionError(err) {
+  const bar = $('#alertBar');
+  bar.className = 'alert warn';
+  bar.textContent = `Cannot reach the engine (${err.message}). Retrying…`;
+}
+
+// ---------- render orchestration ----------
+function render() {
+  const s = ui.snap;
+  if (!s) return;
+  renderBadges(s);
+  renderAlert(s);
+  renderRules(s);
+  renderKpis(s);
+  renderTabs(s);
+  renderPriceChart(s);
+  renderRegimes(s);
+  renderEquity(s);
+  renderPerf(s);
+  renderPositions(s);
+  renderTrades(s);
+  renderSignals(s);
+  renderEvents(s);
+  $('#lastTick').textContent = s.status.lastTickAt
+    ? `last poll ${ago(s.status.lastTickAt)} · tick #${s.status.tickCount} · ${s.config.symbols.length} symbols`
+    : 'waiting for first poll…';
+}
+
+function renderBadges(s) {
+  const modeCls = s.mode === 'live' ? 'live' : 'paper';
+  const dataCls = s.dataSource === 'synthetic' ? 'synthetic' : 'mexc';
+  const dataLabel = s.dataSource === 'synthetic' ? 'Simulated data' : 'MEXC market data';
+  const stCls = s.status.state === 'RUNNING' ? 'running' : 'warning';
+  $('#badges').innerHTML = `
+    <span class="badge ${modeCls}"><span class="pip"></span>${s.mode === 'live' ? 'LIVE trading' : 'Paper trading'}</span>
+    <span class="badge ${dataCls}"><span class="pip"></span>${dataLabel}</span>
+    <span class="badge ${stCls}"><span class="pip"></span>${s.status.state === 'RUNNING' ? 'Engine running' : 'Check warnings'}</span>
+    <span class="badge paper" style="color:var(--violet)"><span class="pip"></span>${s.timeframe} · 1:${s.config.rewardRatio} R:R</span>`;
+}
+
+function renderAlert(s) {
+  const bar = $('#alertBar');
+  const msgs = [];
+  let cls = 'alert';
+  if (s.mode === 'live') {
+    cls = 'alert live';
+    msgs.push('LIVE TRADING: real orders are placed on MEXC with your account balance.');
+  } else if (s.dataSource === 'synthetic') {
+    cls = 'alert warn';
+    msgs.push('Simulated demo data — these are generated candles, not real market prices.');
+  }
+  if (s.status.lastError && Date.now() - ui.offsetMs - s.status.lastError.t < 10 * 60 * 1000) {
+    cls = s.mode === 'live' ? 'alert live' : 'alert warn';
+    msgs.push(`Last error: ${s.status.lastError.msg}`);
+  }
+  const erred = s.symbols.filter((x) => x.status === 'ERROR');
+  if (erred.length) msgs.push(`Data issues on ${erred.map((x) => x.symbol).join(', ')}`);
+  if (msgs.length === 0) {
+    bar.className = 'alert hidden';
+    bar.textContent = '';
+    return;
+  }
+  bar.className = cls;
+  bar.textContent = msgs.join('   •   ');
+}
+
+function renderRules(s) {
+  const c = s.config;
+  const chips = [
+    `<span class="rule-chip buy">▲ Bull divergence <span class="k">→</span> <b>BUY / LONG</b></span>`,
+    `<span class="rule-chip sell">▼ Bear divergence <span class="k">→</span> <b>SELL / SHORT</b></span>`,
+    `<span class="rule-chip tf">◷ <b>${s.timeframe}</b> <span class="k">closed bars only</span></span>`,
+    `<span class="rule-chip rr">◎ TP <b>1:${c.rewardRatio}</b> <span class="k">· SL = swing ${c.stopBufferPct ? `+${c.stopBufferPct}%` : 'low / high'}</span></span>`,
+    `<span class="rule-chip size">◆ Margin <b>${c.riskMarginPct}%</b> <span class="k">× </span><b>${c.leverage}x</b></span>`,
+    `<span class="rule-chip gate">≈ CHOP &lt; <b>${c.chopMax}</b> <span class="k">&amp; ATR ratio ≥</span> <b>${c.volRatioMin}</b></span>`,
+    `<span class="rule-chip size">≡ Max open <b>${c.maxOpenPositions}</b></span>`,
+  ];
+  $('#ruleStrip').innerHTML = chips.join('');
+}
+
+function renderKpis(s) {
+  const a = s.account;
+  const st = s.stats;
+  const winP = Math.max(0, Math.min(100, st.winRate || 0));
+  const pf = st.profitFactor === Infinity ? '∞' : fmtNum(st.profitFactor, 2);
+  const cards = [
+    { cls: 'k-cyan', label: 'Equity', value: fmtUsd(a.equity), sub: `balance ${fmtUsd(a.balance)}` },
+    { cls: 'k-violet', label: 'Available margin', value: fmtUsd(a.available), sub: `in use ${fmtUsd(a.marginUsed)}` },
+    { cls: a.unrealized >= 0 ? 'k-green' : 'k-red', label: 'Unrealised PnL', value: fmtUsd(a.unrealized, true), sub: `${fmtPct(a.equity ? (a.unrealized / a.equity) * 100 : 0, true)} of equity` },
+    { cls: a.pnlTotal >= 0 ? 'k-lime' : 'k-red', label: 'Total PnL', value: fmtUsd(a.pnlTotal, true), sub: `${fmtPct(a.pnlTotalPct, true)} vs start ${fmtUsd(a.startEquity)}` },
+    { cls: 'k-blue', label: 'Win rate', value: fmtPct(st.winRate, false, 1), sub: `${st.wins}W · ${st.losses}L · ${st.trades} trades`, ring: winP },
+    { cls: 'k-pink', label: 'Profit factor', value: pf, sub: `avg R ${fmtNum(st.avgR, 2)} · streak ${st.streak >= 0 ? '+' : ''}${st.streak}` },
+    { cls: 'k-amber', label: 'Max drawdown', value: fmtPct(st.maxDrawdownPct, false, 2), sub: `best ${fmtUsd(st.bestTrade, true)} · worst ${fmtUsd(st.worstTrade, true)}` },
+    { cls: st.pnlToday >= 0 ? 'k-green' : 'k-red', label: "Today's PnL", value: fmtUsd(st.pnlToday, true), sub: `${st.tradesToday} closed today` },
+  ];
+  $('#kpis').innerHTML = cards
+    .map(
+      (k) => `
+      <div class="kpi ${k.cls}">
+        <div class="label">${k.label}</div>
+        <div class="value">${k.value}</div>
+        <div class="sub">${k.sub}</div>
+        ${k.ring !== undefined ? `<div class="winring" style="--p:${k.ring.toFixed(1)}"><span>${k.ring.toFixed(0)}%</span></div>` : ''}
+      </div>`,
+    )
+    .join('');
+}
+
+function regimeClass(status) {
+  return status === 'TRADEABLE' ? 'tradeable' : status === 'CHOPPY' ? 'choppy' : status === 'LOW_VOL' ? 'lowvol' : '';
+}
+function regimeColor(status) {
+  return status === 'TRADEABLE' ? C.green : status === 'CHOPPY' ? C.red : status === 'LOW_VOL' ? C.amber : C.muted;
+}
+
+function pickSymbol(s) {
+  const ok = s.symbols.filter((x) => x.status === 'OK');
+  if (!ui.symbol || !s.symbols.some((x) => x.symbol === ui.symbol)) {
+    ui.symbol = (ok[0] || s.symbols[0] || {}).symbol || null;
+  }
+  return s.symbols.find((x) => x.symbol === ui.symbol) || null;
+}
+
+function renderTabs(s) {
+  const cur = pickSymbol(s);
+  const html = s.symbols
+    .map((x) => {
+      const status = x.regime?.status || x.status;
+      const chg = isNum(x.change24h) ? `<span class="chg" style="color:${x.change24h >= 0 ? C.green : C.red}">${fmtPct(x.change24h, true, 1)}</span>` : '';
+      const active = cur && x.symbol === cur.symbol ? 'active' : '';
+      return `<button class="tab ${active}" data-sym="${esc(x.symbol)}">
+        <span class="dot" style="background:${regimeColor(status)};box-shadow:0 0 8px ${regimeColor(status)}"></span>
+        ${esc(x.symbol)} ${isNum(x.price) ? `<span>${fmtPrice(x.price)}</span>` : ''} ${chg}
+      </button>`;
+    })
+    .join('');
+  const el = $('#symbolTabs');
+  if (el.dataset.key !== html) {
+    el.dataset.key = html;
+    el.innerHTML = html;
+  }
+}
+
+$('#symbolTabs').addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-sym]');
+  if (!btn) return;
+  ui.symbol = btn.dataset.sym;
+  ui.hoverIdx = null;
+  if (ui.snap) {
+    renderTabs(ui.snap);
+    renderPriceChart(ui.snap);
+  }
+});
+
+// ---------- canvas helpers ----------
+function prepCanvas(canvas) {
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  const w = Math.max(20, rect.width);
+  const h = Math.max(20, rect.height);
+  const W = Math.round(w * dpr);
+  const H = Math.round(h * dpr);
+  if (canvas.width !== W || canvas.height !== H) {
+    canvas.width = W;
+    canvas.height = H;
+  }
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  return { ctx, w, h };
+}
+
+function text(ctx, str, x, y, color = C.muted, size = 11, align = 'left', weight = 600) {
+  ctx.fillStyle = color;
+  ctx.font = `${weight} ${size}px ui-monospace, Menlo, Consolas, monospace`;
+  ctx.textAlign = align;
+  ctx.textBaseline = 'middle';
+  ctx.fillText(str, x, y);
+}
+
+function labelBox(ctx, str, x, y, bg, fg = '#0b1020') {
+  ctx.font = '700 11px ui-monospace, Menlo, Consolas, monospace';
+  const w = ctx.measureText(str).width + 10;
+  ctx.fillStyle = bg;
+  roundRect(ctx, x, y - 9, w, 18, 5);
+  ctx.fill();
+  text(ctx, str, x + 5, y, fg, 11, 'left', 700);
+}
+
+function roundRect(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+function hLine(ctx, x1, x2, y, color, dash = [], width = 1) {
+  ctx.save();
+  ctx.strokeStyle = color;
+  ctx.lineWidth = width;
+  ctx.setLineDash(dash);
+  ctx.beginPath();
+  ctx.moveTo(x1, y);
+  ctx.lineTo(x2, y);
+  ctx.stroke();
+  ctx.restore();
+}
+
+// ---------- price + RSI chart ----------
+function renderPriceChart(s) {
+  const canvas = $('#priceChart');
+  const { ctx, w, h } = prepCanvas(canvas);
+  const sym = pickSymbol(s);
+  if (!sym || sym.status !== 'OK' || !sym.candles?.length) {
+    text(ctx, sym?.error || 'Waiting for market data…', w / 2, h / 2, C.muted, 13, 'center');
+    $('#chartSub').textContent = sym ? `${sym.symbol} · ${sym.error || 'no data'}` : 'No symbol selected';
+    ui.candleLayout = null;
+    return;
+  }
+
+  const candles = sym.candles;
+  const n = candles.length;
+  const padL = 10;
+  const padR = 100;
+  const padT = 18;
+  const padB = 22;
+  const gap = 14;
+  const plotW = w - padL - padR;
+  const usable = h - padT - padB - gap;
+  const priceH = usable * 0.68;
+  const rsiH = usable * 0.32;
+  const priceTop = padT;
+  const rsiTop = padT + priceH + gap;
+
+  const positions = s.positions.filter((p) => p.symbol === sym.symbol && !p.external);
+  let lo = Infinity;
+  let hi = -Infinity;
+  for (const c of candles) {
+    lo = Math.min(lo, c.l);
+    hi = Math.max(hi, c.h);
+  }
+  for (const p of positions) {
+    for (const v of [p.stop, p.takeProfit]) if (isNum(v)) { lo = Math.min(lo, v); hi = Math.max(hi, v); }
+  }
+  const span = hi - lo || Math.abs(hi) * 0.01 || 1;
+  lo -= span * 0.05;
+  hi += span * 0.05;
+
+  const yP = (v) => priceTop + ((hi - v) / (hi - lo)) * priceH;
+  const yR = (v) => rsiTop + ((100 - v) / 100) * rsiH;
+  const xI = (i) => padL + ((i + 0.5) * plotW) / n;
+  const cw = Math.max(2, Math.min(14, (plotW / n) * 0.62));
+
+  // background bands
+  ctx.fillStyle = 'rgba(96,165,250,0.03)';
+  ctx.fillRect(padL, priceTop, plotW, priceH);
+  // price grid + labels
+  for (let k = 0; k <= 4; k++) {
+    const v = lo + ((hi - lo) * k) / 4;
+    const y = yP(v);
+    hLine(ctx, padL, w - padR, y, C.grid, [3, 4]);
+    text(ctx, fmtPrice(v), w - padR + 6, y, C.muted, 10);
+  }
+  // RSI zones
+  ctx.fillStyle = 'rgba(248,113,113,0.07)';
+  ctx.fillRect(padL, yR(100), plotW, yR(70) - yR(100));
+  ctx.fillStyle = 'rgba(52,211,153,0.07)';
+  ctx.fillRect(padL, yR(30), plotW, yR(0) - yR(30));
+  for (const lv of [0, 30, 50, 70, 100]) {
+    hLine(ctx, padL, w - padR, yR(lv), lv === 30 || lv === 70 ? 'rgba(251,191,36,0.35)' : C.grid, [4, 4]);
+    text(ctx, String(lv), w - padR + 6, yR(lv), lv === 30 || lv === 70 ? C.amber : C.muted, 10);
+  }
+  text(ctx, 'RSI(16)', padL + 4, rsiTop + 8, C.cyan, 10, 'left', 700);
+
+  // candles
+  for (let i = 0; i < n; i++) {
+    const c = candles[i];
+    const x = xI(i);
+    const up = c.c >= c.o;
+    const col = up ? C.green : C.red;
+    ctx.strokeStyle = col;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(x, yP(c.h));
+    ctx.lineTo(x, yP(c.l));
+    ctx.stroke();
+    const top = yP(Math.max(c.o, c.c));
+    const bot = yP(Math.min(c.o, c.c));
+    ctx.fillStyle = col;
+    ctx.fillRect(x - cw / 2, top, cw, Math.max(1, bot - top));
+  }
+
+  // divergence pivot lines (same construction as the Pine script)
+  for (const m of sym.marks) {
+    const col = m.type === 'BULL' ? C.lime : C.pink;
+    if (m.prevSwingIndex !== null && m.prevSwingPrice !== null && m.prevSwingIndex >= -n) {
+      const x1 = xI(clampIdx(m.prevSwingIndex, n));
+      const x2 = xI(clampIdx(m.swingIndex, n));
+      ctx.save();
+      ctx.strokeStyle = col;
+      ctx.lineWidth = 2;
+      ctx.setLineDash([6, 4]);
+      ctx.beginPath();
+      ctx.moveTo(x1, yP(m.prevSwingPrice));
+      ctx.lineTo(x2, yP(m.swingPrice));
+      ctx.stroke();
+      ctx.restore();
+      if (m.prevRsi !== null) {
+        ctx.save();
+        ctx.strokeStyle = col;
+        ctx.lineWidth = 2;
+        ctx.setLineDash([6, 4]);
+        ctx.beginPath();
+        ctx.moveTo(x1, yR(m.prevRsi));
+        ctx.lineTo(x2, yR(m.rsi));
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
+    ctx.fillStyle = col;
+    ctx.beginPath();
+    ctx.arc(xI(clampIdx(m.swingIndex, n)), yP(m.swingPrice), 3.5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // open positions: entry / SL / TP
+  for (const p of positions) {
+    if (isNum(p.entry)) hLine(ctx, padL, w - padR, yP(p.entry), 'rgba(255,255,255,0.7)', [2, 4], 1);
+    if (isNum(p.stop)) {
+      hLine(ctx, padL, w - padR, yP(p.stop), C.red, [8, 4], 1.6);
+      labelBox(ctx, `SL ${fmtPrice(p.stop)}`, w - padR + 4, yP(p.stop), C.red, '#fff');
+    }
+    if (isNum(p.takeProfit)) {
+      hLine(ctx, padL, w - padR, yP(p.takeProfit), C.green, [8, 4], 1.6);
+      labelBox(ctx, `TP ${fmtPrice(p.takeProfit)}`, w - padR + 4, yP(p.takeProfit), C.green);
+    }
+  }
+
+  // current price
+  if (isNum(sym.price)) {
+    const y = yP(sym.price);
+    hLine(ctx, padL, w - padR, y, C.amber, [1, 3], 1);
+    labelBox(ctx, fmtPrice(sym.price), w - padR + 4, y, C.amber);
+  }
+
+  // signal markers
+  for (const m of sym.marks) {
+    const i = clampIdx(m.index, n);
+    const x = xI(i);
+    const col = m.type === 'BULL' ? C.lime : C.pink;
+    ctx.fillStyle = col;
+    ctx.beginPath();
+    if (m.type === 'BULL') {
+      const y = yP(candles[i].l) + 10;
+      ctx.moveTo(x, y - 7);
+      ctx.lineTo(x - 6, y + 3);
+      ctx.lineTo(x + 6, y + 3);
+      ctx.fill();
+      text(ctx, 'BULL', x, y + 13, col, 9, 'center', 800);
+    } else {
+      const y = yP(candles[i].h) - 10;
+      ctx.moveTo(x, y + 7);
+      ctx.lineTo(x - 6, y - 3);
+      ctx.lineTo(x + 6, y - 3);
+      ctx.fill();
+      text(ctx, 'BEAR', x, y - 13, col, 9, 'center', 800);
+    }
+    // RSI pane marker
+    if (isNum(sym.rsiSeries[i])) {
+      ctx.beginPath();
+      ctx.fillStyle = col;
+      ctx.arc(x, yR(sym.rsiSeries[i]), 4, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = '#0b1020';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+  }
+
+  // RSI line
+  ctx.save();
+  ctx.strokeStyle = C.cyan;
+  ctx.lineWidth = 2;
+  ctx.shadowColor = 'rgba(34,211,238,0.6)';
+  ctx.shadowBlur = 8;
+  ctx.beginPath();
+  let started = false;
+  for (let i = 0; i < n; i++) {
+    const v = sym.rsiSeries[i];
+    if (!isNum(v)) continue;
+    const x = xI(i);
+    const y = yR(v);
+    if (!started) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+    started = true;
+  }
+  ctx.stroke();
+  ctx.restore();
+
+  // x-axis time labels
+  for (let i = 0; i < n; i += Math.max(1, Math.floor(n / 6))) {
+    text(ctx, hm(candles[i].t), xI(i), h - 9, C.muted, 10, 'center');
+  }
+
+  // hover crosshair
+  const hi2 = ui.hoverIdx;
+  if (hi2 !== null && hi2 >= 0 && hi2 < n) {
+    const x = xI(hi2);
+    ctx.save();
+    ctx.strokeStyle = 'rgba(230,235,255,0.35)';
+    ctx.setLineDash([3, 3]);
+    ctx.beginPath();
+    ctx.moveTo(x, priceTop);
+    ctx.lineTo(x, rsiTop + rsiH);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  ui.candleLayout = { padL, plotW, n, candles, sym };
+  const last = candles[n - 1];
+  const regimeTxt = sym.regime ? sym.regime.status : '—';
+  $('#chartSub').innerHTML = `${esc(sym.symbol)} · ${s.timeframe} · last close ${fmtPrice(last.c)} · ${n} closed candles · regime <span class="pill reg-${esc(regimeTxt)}">${esc(regimeTxt)}</span>`;
+}
+
+function hm(t) {
+  return new Date(t).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'UTC' });
+}
+function clampIdx(i, n) {
+  return Math.max(0, Math.min(n - 1, i));
+}
+
+const chartEl = $('.chart-wrap');
+$('#priceChart').addEventListener('mousemove', (e) => {
+  const L = ui.candleLayout;
+  if (!L || !ui.snap) return;
+  const rect = e.target.getBoundingClientRect();
+  const mx = e.clientX - rect.left;
+  const idx = Math.floor(((mx - L.padL) / L.plotW) * L.n);
+  if (idx < 0 || idx >= L.n) return;
+  ui.hoverIdx = idx;
+  renderPriceChart(ui.snap);
+  const c = L.candles[idx];
+  const tip = $('#tooltip');
+  const chop = L.sym.chopSeries?.[idx];
+  const vr = L.sym.volSeries?.[idx];
+  const rsi = L.sym.rsiSeries?.[idx];
+  tip.innerHTML = `
+    <div style="color:${C.cyan};font-weight:800;margin-bottom:4px">${hm(c.t)} UTC</div>
+    <div>O <b>${fmtPrice(c.o)}</b> H <b>${fmtPrice(c.h)}</b></div>
+    <div>L <b>${fmtPrice(c.l)}</b> C <b style="color:${c.c >= c.o ? C.green : C.red}">${fmtPrice(c.c)}</b></div>
+    <div style="margin-top:4px;color:${C.muted}">RSI ${fmtNum(rsi, 1)} · CHOP ${fmtNum(chop, 1)} · ATR× ${fmtNum(vr, 2)}</div>`;
+  tip.classList.remove('hidden');
+  const flip = mx > rect.width * 0.6;
+  tip.style.left = flip ? `${mx - 210}px` : `${mx + 14}px`;
+  tip.style.top = '10px';
+});
+chartEl.addEventListener('mouseleave', () => {
+  ui.hoverIdx = null;
+  $('#tooltip').classList.add('hidden');
+  if (ui.snap) renderPriceChart(ui.snap);
+});
+
+// ---------- regime cards ----------
+function meter({ label, value, max, mark, markLabel, color, fmt }) {
+  const pct = isNum(value) ? Math.max(0, Math.min(100, (value / max) * 100)) : 0;
+  const markPct = (mark / max) * 100;
+  return `
+    <div class="meter">
+      <div class="meter-label"><span>${label}</span><span style="color:${color}">${isNum(value) ? fmt(value) : '—'}</span></div>
+      <div class="meter-bar">
+        <div class="meter-fill" style="width:${pct}%;background:linear-gradient(90deg,${color}88,${color})"></div>
+        <div class="meter-mark" style="left:${markPct}%"><span>${markLabel}</span></div>
+      </div>
+    </div>`;
+}
+
+function renderRegimes(s) {
+  const cur = pickSymbol(s);
+  $('#regimeList').innerHTML = s.symbols
+    .map((x) => {
+      if (x.status !== 'OK') {
+        return `<div class="regime-card">
+          <div class="rc-head"><span class="rc-sym">${esc(x.symbol)}</span><span class="state-pill ERROR">${x.status}</span></div>
+          <div class="rc-foot"><span>${esc(x.error || '')}</span></div></div>`;
+      }
+      const r = x.regime;
+      const status = r.status;
+      const chopColor = r.chop > s.config.chopMax ? C.red : C.green;
+      const volColor = r.volRatio >= s.config.volRatioMin ? C.green : C.amber;
+      const lastSig = s.signals.find((g) => g.symbol === x.symbol);
+      const sigTxt = lastSig ? `${lastSig.type} ${lastSig.action} · ${ago(lastSig.barT)}` : 'no divergence yet';
+      const chg = isNum(x.change24h) ? `<span style="color:${x.change24h >= 0 ? C.green : C.red}">${fmtPct(x.change24h, true, 2)}</span>` : '';
+      return `
+        <div class="regime-card ${regimeClass(status)}" data-sym="${esc(x.symbol)}" style="cursor:pointer">
+          <div class="rc-head">
+            <span class="rc-sym">${esc(x.symbol)}</span>
+            <span class="state-pill ${status}">${status.replace('_', ' ')}</span>
+          </div>
+          <div class="rc-head" style="margin-top:4px">
+            <span class="rc-price">${fmtPrice(x.price)}</span><span class="rc-price">${chg}</span>
+          </div>
+          ${meter({ label: 'Choppiness (CHOP)', value: r.chop, max: 100, mark: s.config.chopMax, markLabel: `${s.config.chopMax} choppy`, color: chopColor, fmt: (v) => v.toFixed(1) })}
+          ${meter({ label: 'Volatility (ATR ÷ avg)', value: r.volRatio, max: 2, mark: s.config.volRatioMin, markLabel: `${s.config.volRatioMin}×`, color: volColor, fmt: (v) => `${v.toFixed(2)}×` })}
+          <div class="rc-foot"><span>RSI ${fmtNum(x.rsi, 1)}</span><span>${esc(sigTxt)}</span></div>
+          <div class="rc-foot" style="margin-top:4px"><span>${esc(r.reason || '')}</span></div>
+        </div>`;
+    })
+    .join('');
+  if (cur) {
+    document.querySelectorAll('.regime-card[data-sym]').forEach((el) =>
+      el.addEventListener('click', () => {
+        ui.symbol = el.dataset.sym;
+        renderTabs(s);
+        renderPriceChart(s);
+      }),
+    );
+  }
+}
+
+// ---------- equity chart ----------
+function renderEquity(s) {
+  const canvas = $('#equityChart');
+  const { ctx, w, h } = prepCanvas(canvas);
+  const pts = s.equity || [];
+  $('#equitySub').textContent = pts.length
+    ? `${pts.length} points · start ${fmtUsd(s.account.startEquity)} · now ${fmtUsd(s.account.equity)}`
+    : 'Equity will appear after the first poll';
+  if (pts.length < 2) {
+    text(ctx, 'Collecting equity points…', w / 2, h / 2, C.muted, 12, 'center');
+    return;
+  }
+  const padL = 10, padR = 84, padT = 14, padB = 22;
+  const plotW = w - padL - padR;
+  const plotH = h - padT - padB;
+  const vals = pts.map((p) => p.equity);
+  let lo = Math.min(...vals, s.account.startEquity);
+  let hi = Math.max(...vals, s.account.startEquity);
+  const span = hi - lo || Math.max(1, hi * 0.001);
+  lo -= span * 0.1;
+  hi += span * 0.1;
+  const y = (v) => padT + ((hi - v) / (hi - lo)) * plotH;
+  const x = (i) => padL + (i / (pts.length - 1)) * plotW;
+
+  for (let k = 0; k <= 3; k++) {
+    const v = lo + ((hi - lo) * k) / 3;
+    hLine(ctx, padL, w - padR, y(v), C.grid, [3, 4]);
+    text(ctx, fmtUsd(v).replace('$', ''), w - padR + 6, y(v), C.muted, 10);
+  }
+  // baseline
+  hLine(ctx, padL, w - padR, y(s.account.startEquity), 'rgba(251,191,36,0.6)', [6, 4], 1.2);
+  text(ctx, 'start', padL + 4, y(s.account.startEquity) - 8, C.amber, 10, 'left', 700);
+
+  const grad = ctx.createLinearGradient(0, padT, 0, h - padB);
+  const up = vals[vals.length - 1] >= s.account.startEquity;
+  grad.addColorStop(0, up ? 'rgba(52,211,153,0.35)' : 'rgba(248,113,113,0.35)');
+  grad.addColorStop(1, 'rgba(10,14,30,0)');
+  ctx.beginPath();
+  ctx.moveTo(x(0), y(vals[0]));
+  for (let i = 1; i < pts.length; i++) ctx.lineTo(x(i), y(vals[i]));
+  ctx.lineTo(x(pts.length - 1), h - padB);
+  ctx.lineTo(x(0), h - padB);
+  ctx.closePath();
+  ctx.fillStyle = grad;
+  ctx.fill();
+
+  ctx.save();
+  const lineGrad = ctx.createLinearGradient(padL, 0, w - padR, 0);
+  lineGrad.addColorStop(0, C.cyan);
+  lineGrad.addColorStop(0.5, C.violet);
+  lineGrad.addColorStop(1, C.pink);
+  ctx.strokeStyle = lineGrad;
+  ctx.lineWidth = 2.2;
+  ctx.shadowColor = 'rgba(167,139,250,0.55)';
+  ctx.shadowBlur = 10;
+  ctx.beginPath();
+  ctx.moveTo(x(0), y(vals[0]));
+  for (let i = 1; i < pts.length; i++) ctx.lineTo(x(i), y(vals[i]));
+  ctx.stroke();
+  ctx.restore();
+
+  const lx = x(pts.length - 1);
+  const ly = y(vals[vals.length - 1]);
+  ctx.beginPath();
+  ctx.fillStyle = up ? C.green : C.red;
+  ctx.arc(lx, ly, 4.5, 0, Math.PI * 2);
+  ctx.fill();
+  labelBox(ctx, fmtUsd(vals[vals.length - 1]), w - padR + 4, ly, up ? C.green : C.red, '#06120c');
+}
+
+// ---------- performance ----------
+function renderPerf(s) {
+  const st = s.stats;
+  const total = st.wins + st.losses;
+  const winPct = total ? (st.wins / total) * 100 : 0;
+  const items = [
+    ['Trades', st.trades, C.cyan],
+    ['Net PnL', fmtUsd(st.totalPnl, true), clsColor(st.totalPnl)],
+    ['Return', fmtPct(st.totalReturnPct, true), clsColor(st.totalReturnPct)],
+    ['Avg R', fmtNum(st.avgR, 2) + 'R', clsColor(st.avgR)],
+    ['Profit factor', st.profitFactor === Infinity ? '∞' : fmtNum(st.profitFactor, 2), C.violet],
+    ['Max DD', fmtPct(st.maxDrawdownPct, false, 2), C.amber],
+    ['Best trade', fmtUsd(st.bestTrade, true), C.green],
+    ['Worst trade', fmtUsd(st.worstTrade, true), C.red],
+  ];
+  $('#perf').innerHTML =
+    items.map(([l, v, c]) => `<div class="perf-item"><div class="l">${l}</div><div class="v" style="color:${c}">${v}</div></div>`).join('') +
+    `<div class="perf-item" style="grid-column: span 2"><div class="l">Wins vs losses</div>
+      <div class="split">
+        <div style="width:${winPct}%;background:linear-gradient(90deg,${C.green},${C.lime})"></div>
+        <div style="width:${100 - winPct}%;background:linear-gradient(90deg,${C.pink},${C.red})"></div>
+      </div>
+      <div class="muted" style="font-size:11px;margin-top:6px;font-family:var(--mono)">${st.wins} wins · ${st.losses} losses</div>
+    </div>`;
+}
+function clsColor(v) {
+  return v > 0 ? C.green : v < 0 ? C.red : C.muted;
+}
+
+// ---------- tables ----------
+function sideTag(side, external) {
+  if (external) return `<span class="pill ext">external</span>`;
+  return `<span class="pill ${side === 'LONG' ? 'long' : 'short'}">${side}</span>`;
+}
+
+function renderPositions(s) {
+  $('#posCount').textContent = s.positions.length;
+  const head = `<thead><tr>
+    <th>Symbol</th><th>Side</th><th>Source</th><th class="num">Entry</th><th class="num">Mark</th>
+    <th class="num">Stop</th><th class="num">Target</th><th>Progress to TP</th>
+    <th class="num">Margin</th><th class="num">Unrealised</th><th>Opened</th></tr></thead>`;
+  if (s.positions.length === 0) {
+    $('#posTable').innerHTML = `${head}<tbody><tr><td class="empty" colspan="11">No open positions. The engine is waiting for a divergence inside a tradable market.</td></tr></tbody>`;
+    return;
+  }
+  const rows = s.positions.map((p) => {
+    const sym = s.symbols.find((x) => x.symbol === p.symbol);
+    const mark = sym?.price;
+    let progress = '';
+    if (!p.external && isNum(p.stop) && isNum(p.takeProfit) && isNum(mark)) {
+      // Works for both sides: 0% at the stop, 100% at the target.
+      const frac = (mark - p.stop) / (p.takeProfit - p.stop);
+      const pct = Math.max(0, Math.min(100, frac * 100));
+      progress = `<div class="progress" title="${pct.toFixed(0)}% of the way from stop to target">
+        <i style="left:${pct}%"></i></div>`;
+    } else {
+      progress = `<span class="muted">${p.external ? 'managed outside bot' : '—'}</span>`;
+    }
+    return `<tr>
+      <td class="sym">${esc(p.symbol)}</td>
+      <td>${sideTag(p.side, p.external)}</td>
+      <td><span class="pill ${p.source === 'live' ? 'other' : 'ext'}">${esc(p.status === 'PENDING' ? 'pending' : p.source)}</span></td>
+      <td class="num">${fmtPrice(p.entry)}</td>
+      <td class="num">${fmtPrice(mark)}</td>
+      <td class="num neg">${fmtPrice(p.stop)}</td>
+      <td class="num pos">${fmtPrice(p.takeProfit)}</td>
+      <td>${progress}</td>
+      <td class="num">${fmtUsd(p.margin)}</td>
+      <td class="num ${clsPnl(p.unrealized)}">${fmtUsd(p.unrealized, true)}</td>
+      <td class="muted">${p.openedAt ? dt(p.openedAt) : '—'}</td>
+    </tr>`;
+  });
+  $('#posTable').innerHTML = `${head}<tbody>${rows.join('')}</tbody>`;
+}
+
+function renderTrades(s) {
+  $('#tradeCount').textContent = s.stats.trades;
+  const head = `<thead><tr>
+    <th>Closed</th><th>Symbol</th><th>Side</th><th>Divergence</th><th class="num">Entry</th><th class="num">Exit</th>
+    <th>Reason</th><th class="num">Margin</th><th class="num">PnL</th><th class="num">PnL %</th><th class="num">R</th></tr></thead>`;
+  if (s.trades.length === 0) {
+    $('#tradeTable').innerHTML = `${head}<tbody><tr><td class="empty" colspan="11">No closed trades yet.</td></tr></tbody>`;
+    return;
+  }
+  const rows = s.trades.map((t) => {
+    const reason = t.exitReason === 'TAKE_PROFIT' ? 'tp' : t.exitReason === 'STOP_LOSS' ? 'sl' : 'other';
+    const label = t.exitReason.replace('_', ' ');
+    return `<tr>
+      <td class="muted">${dt(t.closedAt)}</td>
+      <td class="sym">${esc(t.symbol)}</td>
+      <td><span class="pill ${t.side === 'LONG' ? 'long' : 'short'}">${t.side}</span></td>
+      <td><span class="pill ${t.divergence === 'BULL' ? 'bull' : 'bear'}">${t.divergence || '—'}</span></td>
+      <td class="num">${fmtPrice(t.entry)}</td>
+      <td class="num">${fmtPrice(t.exit)}</td>
+      <td><span class="pill ${reason}">${label}</span></td>
+      <td class="num">${fmtUsd(t.margin)}</td>
+      <td class="num ${clsPnl(t.pnl)}">${fmtUsd(t.pnl, true)}</td>
+      <td class="num ${clsPnl(t.pnlPct)}">${fmtPct(t.pnlPct, true)}</td>
+      <td class="num ${clsPnl(t.rMultiple)}">${fmtNum(t.rMultiple, 2)}R</td>
+    </tr>`;
+  });
+  $('#tradeTable').innerHTML = `${head}<tbody>${rows.join('')}</tbody>`;
+}
+
+function renderSignals(s) {
+  const filters = ['ALL', 'EXECUTED', 'SKIPPED', 'FAILED'];
+  const counts = (k) => (k === 'ALL' ? s.signals.length : s.signals.filter((x) => x.action === k).length);
+  const fhtml = filters.map((f) => `<button class="chip ${ui.sigFilter === f ? 'on' : ''}" data-f="${f}">${f} · ${counts(f)}</button>`).join('');
+  const fEl = $('#sigFilters');
+  if (fEl.dataset.key !== fhtml) {
+    fEl.dataset.key = fhtml;
+    fEl.innerHTML = fhtml;
+  }
+  const list = s.signals.filter((x) => ui.sigFilter === 'ALL' || x.action === ui.sigFilter);
+  if (list.length === 0) {
+    $('#signalList').innerHTML = `<div class="empty muted" style="padding:24px">No ${ui.sigFilter === 'ALL' ? '' : ui.sigFilter.toLowerCase() + ' '}signals yet. Bull/bear divergences appear here as soon as the 15m bar closes.</div>`;
+    return;
+  }
+  $('#signalList').innerHTML = list
+    .slice(0, 120)
+    .map(
+      (g) => `
+      <div class="sig ${g.action}">
+        <div class="sig-top">
+          <span class="sym">${esc(g.symbol)}</span>
+          <span class="pill ${g.type === 'BULL' ? 'bull' : 'bear'}">${g.type} DIV</span>
+          <span class="pill ${g.action}">${g.action}</span>
+          <span class="pill reg-${g.regime}">${String(g.regime).replace('_', ' ')}</span>
+          <span class="sig-time">${dt(g.barT)}</span>
+        </div>
+        <div class="sig-reason">${esc(g.reason)}</div>
+        <div class="muted" style="font-family:var(--mono);font-size:11px;margin-top:4px">
+          close ${fmtPrice(g.price)} · swing ${fmtPrice(g.swingPrice)} · RSI ${fmtNum(g.rsi, 1)}${g.prevRsi != null ? ` (prev ${fmtNum(g.prevRsi, 1)})` : ''} · CHOP ${fmtNum(g.chop, 1)} · ATR× ${fmtNum(g.volRatio, 2)}
+        </div>
+      </div>`,
+    )
+    .join('');
+}
+
+$('#sigFilters').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-f]');
+  if (!b) return;
+  ui.sigFilter = b.dataset.f;
+  if (ui.snap) renderSignals(ui.snap);
+});
+
+function renderEvents(s) {
+  const items = [];
+  if (s.status.lastError) items.push({ t: s.status.lastError.t, msg: s.status.lastError.msg, err: true });
+  for (const e of s.events || []) items.push({ t: e.t, msg: e.msg, err: false });
+  items.sort((a, b) => b.t - a.t);
+  $('#events').innerHTML = items.length
+    ? items
+        .slice(0, 40)
+        .map((i) => `<li class="${i.err ? 'err' : ''}"><span class="t">${hms(i.t)}</span>${esc(i.msg)}</li>`)
+        .join('')
+    : `<li><span class="t">${hms(Date.now() - ui.offsetMs)}</span>Engine started. No events yet.</li>`;
+}
+
+// ---------- clocks ----------
+function tickClock() {
+  const now = Date.now() - ui.offsetMs;
+  $('#utcNow').textContent = `${hms(now)} UTC`;
+  const s = ui.snap;
+  if (!s) return;
+  const remaining = Math.max(0, s.status.nextCandleAt - now);
+  const elapsed = TF_MS - remaining;
+  const mm = String(Math.floor(remaining / 60000)).padStart(2, '0');
+  const ss = String(Math.floor((remaining % 60000) / 1000)).padStart(2, '0');
+  $('#countdown').textContent = `${mm}:${ss}`;
+  $('#ringFg').style.strokeDasharray = RING_C.toFixed(2);
+  $('#ringFg').style.strokeDashoffset = (RING_C * (1 - elapsed / TF_MS)).toFixed(2);
+  if (Date.now() - ui.lastOk > 15000 && ui.lastOk) {
+    $('#lastTick').textContent = `no response for ${Math.round((Date.now() - ui.lastOk) / 1000)}s`;
+  }
+}
+
+window.addEventListener('resize', () => ui.snap && render());
+setInterval(tickClock, 1000);
+tickClock();
+poll();

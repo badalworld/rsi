@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Mo3ty RSI · MEXC Futures Engine</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23111833'/%3E%3Cpath d='M5 22 L12 12 L17 18 L27 8' stroke='%2322d3ee' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="bg-orbs" aria-hidden="true"><span></span><span></span><span></span></div>
+
+  <header class="topbar">
+    <div class="brand">
+      <div class="logo">
+        <svg viewBox="0 0 40 40" width="38" height="38" aria-hidden="true">
+          <defs>
+            <linearGradient id="lg" x1="0" x2="1" y1="0" y2="1">
+              <stop offset="0" stop-color="#22d3ee" />
+              <stop offset="0.5" stop-color="#a78bfa" />
+              <stop offset="1" stop-color="#f472b6" />
+            </linearGradient>
+          </defs>
+          <rect x="1" y="1" width="38" height="38" rx="11" fill="#0f1733" stroke="url(#lg)" stroke-width="1.5" />
+          <path d="M7 28 L14 16 L20 23 L26 13 L33 20" stroke="url(#lg)" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round" />
+        </svg>
+      </div>
+      <div>
+        <div class="brand-title">MO3TY <span>RSI</span> ENGINE</div>
+        <div class="brand-sub">MEXC USDT-M futures · 15m · divergence-only execution</div>
+      </div>
+    </div>
+
+    <div class="top-badges" id="badges"></div>
+
+    <div class="clock">
+      <div class="ring-wrap">
+        <svg viewBox="0 0 64 64" class="ring" aria-hidden="true">
+          <circle cx="32" cy="32" r="27" class="ring-bg" />
+          <circle cx="32" cy="32" r="27" class="ring-fg" id="ringFg" />
+        </svg>
+        <div class="ring-text"><div id="countdown">--:--</div><small>next 15m candle</small></div>
+      </div>
+      <div class="clock-meta">
+        <div><span class="dot"></span> <span id="utcNow">--:--:-- UTC</span></div>
+        <div class="muted" id="lastTick">waiting for first poll…</div>
+      </div>
+    </div>
+  </header>
+
+  <div id="alertBar" class="alert hidden"></div>
+
+  <section class="rule-strip" id="ruleStrip"></section>
+
+  <section class="kpis" id="kpis"></section>
+
+  <main class="grid">
+    <section class="panel span-2 chart-panel">
+      <div class="panel-head">
+        <div>
+          <h2>Market structure</h2>
+          <p class="muted" id="chartSub">Select a symbol</p>
+        </div>
+        <div class="tabs" id="symbolTabs"></div>
+      </div>
+      <div class="chart-wrap">
+        <canvas id="priceChart"></canvas>
+        <div class="tooltip hidden" id="tooltip"></div>
+      </div>
+      <div class="legend">
+        <span><i class="sw bull"></i>Bull divergence (long)</span>
+        <span><i class="sw bear"></i>Bear divergence (short)</span>
+        <span><i class="sw sl"></i>Stop (swing)</span>
+        <span><i class="sw tp"></i>Take profit 1:2</span>
+        <span><i class="sw entry"></i>Entry</span>
+        <span><i class="sw rsi"></i>RSI(16)</span>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <div>
+          <h2>Regime gate</h2>
+          <p class="muted">Choppy &amp; volatility check per symbol</p>
+        </div>
+      </div>
+      <div class="regime-list" id="regimeList"></div>
+    </section>
+
+    <section class="panel span-2">
+      <div class="panel-head">
+        <div>
+          <h2>Equity curve</h2>
+          <p class="muted" id="equitySub">--</p>
+        </div>
+      </div>
+      <div class="chart-wrap small"><canvas id="equityChart"></canvas></div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <div>
+          <h2>Performance</h2>
+          <p class="muted">All closed trades</p>
+        </div>
+      </div>
+      <div class="perf" id="perf"></div>
+    </section>
+
+    <section class="panel span-3">
+      <div class="panel-head">
+        <div>
+          <h2>Open positions</h2>
+          <p class="muted">Progress bar: stop (left) → take profit (right)</p>
+        </div>
+        <span class="count-pill" id="posCount">0</span>
+      </div>
+      <div class="table-wrap"><table id="posTable"></table></div>
+    </section>
+
+    <section class="panel span-2">
+      <div class="panel-head">
+        <div>
+          <h2>Trade history</h2>
+          <p class="muted">Most recent first</p>
+        </div>
+        <span class="count-pill" id="tradeCount">0</span>
+      </div>
+      <div class="table-wrap tall"><table id="tradeTable"></table></div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <div>
+          <h2>Signal log</h2>
+          <p class="muted">Every divergence and why it was taken or skipped</p>
+        </div>
+      </div>
+      <div class="filters" id="sigFilters"></div>
+      <div class="signal-list" id="signalList"></div>
+    </section>
+
+    <section class="panel span-3 events-panel">
+      <div class="panel-head">
+        <div>
+          <h2>Engine events</h2>
+          <p class="muted">Broker notices, sync results, and errors</p>
+        </div>
+      </div>
+      <ul class="events" id="events"></ul>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <p>Trading involves substantial risk. This engine runs your Mo3ty RSI divergence rules only; it does not guarantee profit. Paper-trade first, and only enable live mode with funds you can afford to lose.</p>
+  </footer>
+
+  <script src="/app.js" type="module"></script>
+</body>
+</html>

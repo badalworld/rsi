@@ -1,0 +1,16 @@
+{
+  "name": "mexc-mo3ty-rsi-bot",
+  "version": "1.0.0",
+  "description": "MEXC futures auto-trader driven only by the Mo3ty RSI divergence indicator (15m), with a live trading dashboard.",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node --env-file-if-exists=.env src/main.js",
+    "test": "node --test test/*.test.js",
+    "backtest": "node --env-file-if-exists=.env scripts/backtest.js",
+    "reset": "rm -f data/state.json"
+  }
+}
