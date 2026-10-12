@@ -19,12 +19,9 @@ const C = {
 
 const ui = {
   snap: null,
-  symbol: null,
   sigFilter: 'ALL',
   offsetMs: 0,
-  hoverIdx: null,
   lastOk: 0,
-  candleLayout: null,
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -100,8 +97,6 @@ function render() {
   renderAlert(s);
   renderRules(s);
   renderKpis(s);
-  renderTabs(s);
-  renderPriceChart(s);
   renderRegimes(s);
   renderEquity(s);
   renderPerf(s);
@@ -202,45 +197,6 @@ function regimeColor(status) {
   return status === 'TRADEABLE' ? C.green : status === 'CHOPPY' ? C.red : status === 'LOW_VOL' ? C.amber : C.muted;
 }
 
-function pickSymbol(s) {
-  const ok = s.symbols.filter((x) => x.status === 'OK');
-  if (!ui.symbol || !s.symbols.some((x) => x.symbol === ui.symbol)) {
-    ui.symbol = (ok[0] || s.symbols[0] || {}).symbol || null;
-  }
-  return s.symbols.find((x) => x.symbol === ui.symbol) || null;
-}
-
-function renderTabs(s) {
-  const cur = pickSymbol(s);
-  const html = s.symbols
-    .map((x) => {
-      const status = x.regime?.status || x.status;
-      const chg = isNum(x.change24h) ? `<span class="chg" style="color:${x.change24h >= 0 ? C.green : C.red}">${fmtPct(x.change24h, true, 1)}</span>` : '';
-      const active = cur && x.symbol === cur.symbol ? 'active' : '';
-      return `<button class="tab ${active}" data-sym="${esc(x.symbol)}">
-        <span class="dot" style="background:${regimeColor(status)};box-shadow:0 0 8px ${regimeColor(status)}"></span>
-        ${esc(x.symbol)} ${isNum(x.price) ? `<span>${fmtPrice(x.price)}</span>` : ''} ${chg}
-      </button>`;
-    })
-    .join('');
-  const el = $('#symbolTabs');
-  if (el.dataset.key !== html) {
-    el.dataset.key = html;
-    el.innerHTML = html;
-  }
-}
-
-$('#symbolTabs').addEventListener('click', (e) => {
-  const btn = e.target.closest('[data-sym]');
-  if (!btn) return;
-  ui.symbol = btn.dataset.sym;
-  ui.hoverIdx = null;
-  if (ui.snap) {
-    renderTabs(ui.snap);
-    renderPriceChart(ui.snap);
-  }
-});
-
 // ---------- canvas helpers ----------
 function prepCanvas(canvas) {
   const dpr = window.devicePixelRatio || 1;
@@ -298,260 +254,6 @@ function hLine(ctx, x1, x2, y, color, dash = [], width = 1) {
   ctx.restore();
 }
 
-// ---------- price + RSI chart ----------
-function renderPriceChart(s) {
-  const canvas = $('#priceChart');
-  const { ctx, w, h } = prepCanvas(canvas);
-  const sym = pickSymbol(s);
-  if (!sym || sym.status !== 'OK' || !sym.candles?.length) {
-    text(ctx, sym?.error || 'Waiting for market data…', w / 2, h / 2, C.muted, 13, 'center');
-    $('#chartSub').textContent = sym ? `${sym.symbol} · ${sym.error || 'no data'}` : 'No symbol selected';
-    ui.candleLayout = null;
-    return;
-  }
-
-  const candles = sym.candles;
-  const n = candles.length;
-  const padL = 10;
-  const padR = 100;
-  const padT = 18;
-  const padB = 22;
-  const gap = 14;
-  const plotW = w - padL - padR;
-  const usable = h - padT - padB - gap;
-  const priceH = usable * 0.68;
-  const rsiH = usable * 0.32;
-  const priceTop = padT;
-  const rsiTop = padT + priceH + gap;
-
-  const positions = s.positions.filter((p) => p.symbol === sym.symbol && !p.external);
-  let lo = Infinity;
-  let hi = -Infinity;
-  for (const c of candles) {
-    lo = Math.min(lo, c.l);
-    hi = Math.max(hi, c.h);
-  }
-  for (const p of positions) {
-    for (const v of [p.stop, p.takeProfit]) if (isNum(v)) { lo = Math.min(lo, v); hi = Math.max(hi, v); }
-  }
-  const span = hi - lo || Math.abs(hi) * 0.01 || 1;
-  lo -= span * 0.05;
-  hi += span * 0.05;
-
-  const yP = (v) => priceTop + ((hi - v) / (hi - lo)) * priceH;
-  const yR = (v) => rsiTop + ((100 - v) / 100) * rsiH;
-  const xI = (i) => padL + ((i + 0.5) * plotW) / n;
-  const cw = Math.max(2, Math.min(14, (plotW / n) * 0.62));
-
-  // background bands
-  ctx.fillStyle = 'rgba(96,165,250,0.03)';
-  ctx.fillRect(padL, priceTop, plotW, priceH);
-  // price grid + labels
-  for (let k = 0; k <= 4; k++) {
-    const v = lo + ((hi - lo) * k) / 4;
-    const y = yP(v);
-    hLine(ctx, padL, w - padR, y, C.grid, [3, 4]);
-    text(ctx, fmtPrice(v), w - padR + 6, y, C.muted, 10);
-  }
-  // RSI zones
-  ctx.fillStyle = 'rgba(248,113,113,0.07)';
-  ctx.fillRect(padL, yR(100), plotW, yR(70) - yR(100));
-  ctx.fillStyle = 'rgba(52,211,153,0.07)';
-  ctx.fillRect(padL, yR(30), plotW, yR(0) - yR(30));
-  for (const lv of [0, 30, 50, 70, 100]) {
-    hLine(ctx, padL, w - padR, yR(lv), lv === 30 || lv === 70 ? 'rgba(251,191,36,0.35)' : C.grid, [4, 4]);
-    text(ctx, String(lv), w - padR + 6, yR(lv), lv === 30 || lv === 70 ? C.amber : C.muted, 10);
-  }
-  text(ctx, 'RSI(16)', padL + 4, rsiTop + 8, C.cyan, 10, 'left', 700);
-
-  // candles
-  for (let i = 0; i < n; i++) {
-    const c = candles[i];
-    const x = xI(i);
-    const up = c.c >= c.o;
-    const col = up ? C.green : C.red;
-    ctx.strokeStyle = col;
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(x, yP(c.h));
-    ctx.lineTo(x, yP(c.l));
-    ctx.stroke();
-    const top = yP(Math.max(c.o, c.c));
-    const bot = yP(Math.min(c.o, c.c));
-    ctx.fillStyle = col;
-    ctx.fillRect(x - cw / 2, top, cw, Math.max(1, bot - top));
-  }
-
-  // divergence pivot lines (same construction as the Pine script)
-  for (const m of sym.marks) {
-    const col = m.type === 'BULL' ? C.lime : C.pink;
-    if (m.prevSwingIndex !== null && m.prevSwingPrice !== null && m.prevSwingIndex >= -n) {
-      const x1 = xI(clampIdx(m.prevSwingIndex, n));
-      const x2 = xI(clampIdx(m.swingIndex, n));
-      ctx.save();
-      ctx.strokeStyle = col;
-      ctx.lineWidth = 2;
-      ctx.setLineDash([6, 4]);
-      ctx.beginPath();
-      ctx.moveTo(x1, yP(m.prevSwingPrice));
-      ctx.lineTo(x2, yP(m.swingPrice));
-      ctx.stroke();
-      ctx.restore();
-      if (m.prevRsi !== null) {
-        ctx.save();
-        ctx.strokeStyle = col;
-        ctx.lineWidth = 2;
-        ctx.setLineDash([6, 4]);
-        ctx.beginPath();
-        ctx.moveTo(x1, yR(m.prevRsi));
-        ctx.lineTo(x2, yR(m.rsi));
-        ctx.stroke();
-        ctx.restore();
-      }
-    }
-    ctx.fillStyle = col;
-    ctx.beginPath();
-    ctx.arc(xI(clampIdx(m.swingIndex, n)), yP(m.swingPrice), 3.5, 0, Math.PI * 2);
-    ctx.fill();
-  }
-
-  // open positions: entry / SL / TP
-  for (const p of positions) {
-    if (isNum(p.entry)) hLine(ctx, padL, w - padR, yP(p.entry), 'rgba(255,255,255,0.7)', [2, 4], 1);
-    if (isNum(p.stop)) {
-      hLine(ctx, padL, w - padR, yP(p.stop), C.red, [8, 4], 1.6);
-      labelBox(ctx, `SL ${fmtPrice(p.stop)}`, w - padR + 4, yP(p.stop), C.red, '#fff');
-    }
-    if (isNum(p.takeProfit)) {
-      hLine(ctx, padL, w - padR, yP(p.takeProfit), C.green, [8, 4], 1.6);
-      labelBox(ctx, `TP ${fmtPrice(p.takeProfit)}`, w - padR + 4, yP(p.takeProfit), C.green);
-    }
-  }
-
-  // current price
-  if (isNum(sym.price)) {
-    const y = yP(sym.price);
-    hLine(ctx, padL, w - padR, y, C.amber, [1, 3], 1);
-    labelBox(ctx, fmtPrice(sym.price), w - padR + 4, y, C.amber);
-  }
-
-  // signal markers
-  for (const m of sym.marks) {
-    const i = clampIdx(m.index, n);
-    const x = xI(i);
-    const col = m.type === 'BULL' ? C.lime : C.pink;
-    ctx.fillStyle = col;
-    ctx.beginPath();
-    if (m.type === 'BULL') {
-      const y = yP(candles[i].l) + 10;
-      ctx.moveTo(x, y - 7);
-      ctx.lineTo(x - 6, y + 3);
-      ctx.lineTo(x + 6, y + 3);
-      ctx.fill();
-      text(ctx, 'BULL', x, y + 13, col, 9, 'center', 800);
-    } else {
-      const y = yP(candles[i].h) - 10;
-      ctx.moveTo(x, y + 7);
-      ctx.lineTo(x - 6, y - 3);
-      ctx.lineTo(x + 6, y - 3);
-      ctx.fill();
-      text(ctx, 'BEAR', x, y - 13, col, 9, 'center', 800);
-    }
-    // RSI pane marker
-    if (isNum(sym.rsiSeries[i])) {
-      ctx.beginPath();
-      ctx.fillStyle = col;
-      ctx.arc(x, yR(sym.rsiSeries[i]), 4, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.strokeStyle = '#0b1020';
-      ctx.lineWidth = 1;
-      ctx.stroke();
-    }
-  }
-
-  // RSI line
-  ctx.save();
-  ctx.strokeStyle = C.cyan;
-  ctx.lineWidth = 2;
-  ctx.shadowColor = 'rgba(34,211,238,0.6)';
-  ctx.shadowBlur = 8;
-  ctx.beginPath();
-  let started = false;
-  for (let i = 0; i < n; i++) {
-    const v = sym.rsiSeries[i];
-    if (!isNum(v)) continue;
-    const x = xI(i);
-    const y = yR(v);
-    if (!started) ctx.moveTo(x, y);
-    else ctx.lineTo(x, y);
-    started = true;
-  }
-  ctx.stroke();
-  ctx.restore();
-
-  // x-axis time labels
-  for (let i = 0; i < n; i += Math.max(1, Math.floor(n / 6))) {
-    text(ctx, hm(candles[i].t), xI(i), h - 9, C.muted, 10, 'center');
-  }
-
-  // hover crosshair
-  const hi2 = ui.hoverIdx;
-  if (hi2 !== null && hi2 >= 0 && hi2 < n) {
-    const x = xI(hi2);
-    ctx.save();
-    ctx.strokeStyle = 'rgba(230,235,255,0.35)';
-    ctx.setLineDash([3, 3]);
-    ctx.beginPath();
-    ctx.moveTo(x, priceTop);
-    ctx.lineTo(x, rsiTop + rsiH);
-    ctx.stroke();
-    ctx.restore();
-  }
-
-  ui.candleLayout = { padL, plotW, n, candles, sym };
-  const last = candles[n - 1];
-  const regimeTxt = sym.regime ? sym.regime.status : '—';
-  $('#chartSub').innerHTML = `${esc(sym.symbol)} · ${s.timeframe} · last close ${fmtPrice(last.c)} · ${n} closed candles · regime <span class="pill reg-${esc(regimeTxt)}">${esc(regimeTxt)}</span>`;
-}
-
-function hm(t) {
-  return new Date(t).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'UTC' });
-}
-function clampIdx(i, n) {
-  return Math.max(0, Math.min(n - 1, i));
-}
-
-const chartEl = $('.chart-wrap');
-$('#priceChart').addEventListener('mousemove', (e) => {
-  const L = ui.candleLayout;
-  if (!L || !ui.snap) return;
-  const rect = e.target.getBoundingClientRect();
-  const mx = e.clientX - rect.left;
-  const idx = Math.floor(((mx - L.padL) / L.plotW) * L.n);
-  if (idx < 0 || idx >= L.n) return;
-  ui.hoverIdx = idx;
-  renderPriceChart(ui.snap);
-  const c = L.candles[idx];
-  const tip = $('#tooltip');
-  const chop = L.sym.chopSeries?.[idx];
-  const vr = L.sym.volSeries?.[idx];
-  const rsi = L.sym.rsiSeries?.[idx];
-  tip.innerHTML = `
-    <div style="color:${C.cyan};font-weight:800;margin-bottom:4px">${hm(c.t)} UTC</div>
-    <div>O <b>${fmtPrice(c.o)}</b> H <b>${fmtPrice(c.h)}</b></div>
-    <div>L <b>${fmtPrice(c.l)}</b> C <b style="color:${c.c >= c.o ? C.green : C.red}">${fmtPrice(c.c)}</b></div>
-    <div style="margin-top:4px;color:${C.muted}">RSI ${fmtNum(rsi, 1)} · CHOP ${fmtNum(chop, 1)} · ATR× ${fmtNum(vr, 2)}</div>`;
-  tip.classList.remove('hidden');
-  const flip = mx > rect.width * 0.6;
-  tip.style.left = flip ? `${mx - 210}px` : `${mx + 14}px`;
-  tip.style.top = '10px';
-});
-chartEl.addEventListener('mouseleave', () => {
-  ui.hoverIdx = null;
-  $('#tooltip').classList.add('hidden');
-  if (ui.snap) renderPriceChart(ui.snap);
-});
-
 // ---------- regime cards ----------
 function meter({ label, value, max, mark, markLabel, color, fmt }) {
   const pct = isNum(value) ? Math.max(0, Math.min(100, (value / max) * 100)) : 0;
@@ -567,7 +269,6 @@ function meter({ label, value, max, mark, markLabel, color, fmt }) {
 }
 
 function renderRegimes(s) {
-  const cur = pickSymbol(s);
   $('#regimeList').innerHTML = s.symbols
     .map((x) => {
       if (x.status !== 'OK') {
@@ -583,7 +284,7 @@ function renderRegimes(s) {
       const sigTxt = lastSig ? `${lastSig.type} ${lastSig.action} · ${ago(lastSig.barT)}` : 'no divergence yet';
       const chg = isNum(x.change24h) ? `<span style="color:${x.change24h >= 0 ? C.green : C.red}">${fmtPct(x.change24h, true, 2)}</span>` : '';
       return `
-        <div class="regime-card ${regimeClass(status)}" data-sym="${esc(x.symbol)}" style="cursor:pointer">
+        <div class="regime-card ${regimeClass(status)}">
           <div class="rc-head">
             <span class="rc-sym">${esc(x.symbol)}</span>
             <span class="state-pill ${status}">${status.replace('_', ' ')}</span>
@@ -598,15 +299,7 @@ function renderRegimes(s) {
         </div>`;
     })
     .join('');
-  if (cur) {
-    document.querySelectorAll('.regime-card[data-sym]').forEach((el) =>
-      el.addEventListener('click', () => {
-        ui.symbol = el.dataset.sym;
-        renderTabs(s);
-        renderPriceChart(s);
-      }),
-    );
-  }
+
 }
 
 // ---------- equity chart ----------
