@@ -280,7 +280,7 @@ td.num, th.num { font-family: var(--mono); text-align: right; }
   padding: 5px 10px; border-radius: 999px; border: 1px solid var(--line); background: transparent; color: var(--muted);
 }
 .chip.on { color: #0b1020; background: var(--grad); border-color: transparent; }
-.signal-list { display: grid; gap: 8px; max-height: 470px; overflow-y: auto; padding-right: 4px; }
+.signal-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(380px, 1fr)); gap: 10px; max-height: 620px; overflow-y: auto; padding-right: 4px; }
 .sig {
   padding: 10px 12px; border-radius: 14px; background: rgba(5,8,20,.5); border: 1px solid rgba(129,140,248,.12);
   border-left: 3px solid var(--muted);
