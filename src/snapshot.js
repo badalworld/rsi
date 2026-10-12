@@ -103,10 +103,95 @@ export function buildSnapshot({ cfg, engine, now }) {
     },
     stats,
     positions: broker.openPositions(),
+    pnl: computePnlAnalytics(trades, now),
     trades: trades.slice(-150).reverse(),
     signals: st.signals.slice(-150).reverse(),
     equity: st.equityCurve.slice(-600),
     symbols,
     events: (broker.events || []).slice(-30).reverse(),
+  };
+}
+
+// PnL analytics for the dashboard, computed from closed trades only.
+export function computePnlAnalytics(trades, now, days = 30) {
+  const sorted = [...trades].sort((a, b) => a.closedAt - b.closedAt);
+
+  let cum = 0;
+  const cumulative = sorted.map((t) => {
+    cum += t.pnl;
+    return { t: t.closedAt, pnl: t.pnl, cum, symbol: t.symbol };
+  });
+
+  // Daily realised PnL (UTC) for the last `days` days, oldest first.
+  const today = new Date(now);
+  today.setUTCHours(0, 0, 0, 0);
+  const dayMap = new Map();
+  for (let i = days - 1; i >= 0; i--) {
+    const d = new Date(today.getTime() - i * 24 * 60 * 60 * 1000);
+    dayMap.set(d.toISOString().slice(0, 10), { day: d.toISOString().slice(0, 10), pnl: 0, trades: 0, wins: 0 });
+  }
+  for (const t of sorted) {
+    const key = new Date(t.closedAt).toISOString().slice(0, 10);
+    const row = dayMap.get(key);
+    if (row) {
+      row.pnl += t.pnl;
+      row.trades++;
+      if (t.pnl > 0) row.wins++;
+    }
+  }
+  const daily = [...dayMap.values()];
+
+  // By symbol
+  const symMap = new Map();
+  for (const t of sorted) {
+    if (!symMap.has(t.symbol)) symMap.set(t.symbol, { symbol: t.symbol, pnl: 0, trades: 0, wins: 0 });
+    const r = symMap.get(t.symbol);
+    r.pnl += t.pnl;
+    r.trades++;
+    if (t.pnl > 0) r.wins++;
+  }
+  const bySymbol = [...symMap.values()].sort((a, b) => b.pnl - a.pnl);
+
+  // By side
+  const bySide = ['LONG', 'SHORT'].map((side) => {
+    const ts = sorted.filter((t) => t.side === side);
+    return { side, pnl: ts.reduce((s, t) => s + t.pnl, 0), trades: ts.length, wins: ts.filter((t) => t.pnl > 0).length };
+  });
+
+  // R-multiple distribution
+  const bins = [
+    { label: '≤ -2R', min: -Infinity, max: -2 },
+    { label: '-2 … -1R', min: -2, max: -1 },
+    { label: '-1 … 0R', min: -1, max: 0 },
+    { label: '0 … 1R', min: 0, max: 1 },
+    { label: '1 … 2R', min: 1, max: 2 },
+    { label: '2 … 3R', min: 2, max: 3 },
+    { label: '≥ 3R', min: 3, max: Infinity },
+  ];
+  const rHist = bins.map((b) => ({
+    label: b.label,
+    count: sorted.filter((t) => t.rMultiple > b.min && t.rMultiple <= b.max).length,
+  }));
+
+  // Exit reasons
+  const exitReasons = {};
+  for (const t of sorted) exitReasons[t.exitReason] = (exitReasons[t.exitReason] || 0) + 1;
+
+  const best = sorted.reduce((b, t) => (b === null || t.pnl > b.pnl ? t : b), null);
+  const worst = sorted.reduce((w, t) => (w === null || t.pnl < w.pnl ? t : w), null);
+  const bestDay = daily.reduce((b, d) => (b === null || d.pnl > b.pnl ? d : b), null);
+  const worstDay = daily.reduce((w, d) => (w === null || d.pnl < w.pnl ? d : w), null);
+
+  return {
+    cumulative: cumulative.slice(-500),
+    daily,
+    bySymbol,
+    bySide,
+    rHist,
+    exitReasons,
+    bestTrade: best ? { symbol: best.symbol, pnl: best.pnl, t: best.closedAt } : null,
+    worstTrade: worst ? { symbol: worst.symbol, pnl: worst.pnl, t: worst.closedAt } : null,
+    bestDay: bestDay && bestDay.trades ? bestDay : null,
+    worstDay: worstDay && worstDay.trades ? worstDay : null,
   };
 }

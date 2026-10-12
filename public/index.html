@@ -107,6 +107,56 @@
       <div class="perf" id="perf"></div>
     </section>
 
+    <section class="panel span-2">
+      <div class="panel-head">
+        <div>
+          <h2>Cumulative realised PnL</h2>
+          <p class="muted" id="cumSub">Closed trades only</p>
+        </div>
+      </div>
+      <div class="chart-wrap small"><canvas id="cumChart"></canvas></div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <div>
+          <h2>Daily PnL</h2>
+          <p class="muted" id="dailySub">Last 30 UTC days</p>
+        </div>
+      </div>
+      <div class="chart-wrap small"><canvas id="dailyChart"></canvas></div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <div>
+          <h2>PnL by symbol</h2>
+          <p class="muted">Net realised PnL per market</p>
+        </div>
+      </div>
+      <div class="sym-bars" id="symBars"></div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <div>
+          <h2>R-multiple distribution</h2>
+          <p class="muted">Each trade's result in units of initial risk</p>
+        </div>
+      </div>
+      <div class="chart-wrap small"><canvas id="rChart"></canvas></div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <div>
+          <h2>Side &amp; exit breakdown</h2>
+          <p class="muted">Where the PnL comes from</p>
+        </div>
+      </div>
+      <div id="breakdown"></div>
+    </section>
+
     <section class="panel span-3">
       <div class="panel-head">
         <div>

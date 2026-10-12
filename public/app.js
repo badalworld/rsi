@@ -105,6 +105,7 @@ function render() {
   renderRegimes(s);
   renderEquity(s);
   renderPerf(s);
+  renderPnl(s);
   renderPositions(s);
   renderTrades(s);
   renderSignals(s);
@@ -705,6 +706,221 @@ function renderPerf(s) {
 }
 function clsColor(v) {
   return v > 0 ? C.green : v < 0 ? C.red : C.muted;
+}
+
+// ---------- PnL analytics ----------
+function renderPnl(s) {
+  const p = s.pnl;
+  if (!p) return;
+  renderCumulative(s, p);
+  renderDaily(p);
+  renderSymbolBars(p);
+  renderRHist(p);
+  renderBreakdown(s, p);
+}
+
+function renderCumulative(s, p) {
+  const canvas = $('#cumChart');
+  const { ctx, w, h } = prepCanvas(canvas);
+  const pts = p.cumulative;
+  $('#cumSub').textContent = pts.length
+    ? `${pts.length} closed trades · net ${fmtUsd(pts[pts.length - 1].cum, true)} · best ${fmtUsd(p.bestTrade?.pnl ?? 0, true)} · worst ${fmtUsd(p.worstTrade?.pnl ?? 0, true)}`
+    : 'Closed trades only';
+  if (pts.length === 0) {
+    text(ctx, 'No closed trades yet — the curve starts with the first exit.', w / 2, h / 2, C.muted, 12, 'center');
+    return;
+  }
+  const padL = 10, padR = 84, padT = 14, padB = 22;
+  const plotW = w - padL - padR;
+  const plotH = h - padT - padB;
+  const vals = [0, ...pts.map((q) => q.cum)];
+  let lo = Math.min(...vals);
+  let hi = Math.max(...vals);
+  const span = hi - lo || 1;
+  lo -= span * 0.1;
+  hi += span * 0.1;
+  const y = (v) => padT + ((hi - v) / (hi - lo)) * plotH;
+  const x = (i) => padL + (vals.length === 1 ? 0 : (i / (vals.length - 1)) * plotW);
+
+  for (let k = 0; k <= 3; k++) {
+    const v = lo + ((hi - lo) * k) / 3;
+    hLine(ctx, padL, w - padR, y(v), C.grid, [3, 4]);
+    text(ctx, fmtUsd(v).replace('$', ''), w - padR + 6, y(v), C.muted, 10);
+  }
+  hLine(ctx, padL, w - padR, y(0), 'rgba(230,235,255,0.45)', [6, 4], 1.2);
+  text(ctx, '0', padL + 4, y(0) - 8, C.muted, 10, 'left', 700);
+
+  const last = vals[vals.length - 1];
+  const up = last >= 0;
+  const grad = ctx.createLinearGradient(0, padT, 0, h - padB);
+  grad.addColorStop(0, up ? 'rgba(163,230,53,0.35)' : 'rgba(248,113,113,0.35)');
+  grad.addColorStop(1, 'rgba(10,14,30,0)');
+  ctx.beginPath();
+  ctx.moveTo(x(0), y(0));
+  for (let i = 0; i < vals.length; i++) ctx.lineTo(x(i), y(vals[i]));
+  ctx.lineTo(x(vals.length - 1), y(0));
+  ctx.closePath();
+  ctx.fillStyle = grad;
+  ctx.fill();
+
+  ctx.save();
+  ctx.strokeStyle = up ? C.lime : C.red;
+  ctx.lineWidth = 2.2;
+  ctx.shadowColor = up ? 'rgba(163,230,53,0.5)' : 'rgba(248,113,113,0.5)';
+  ctx.shadowBlur = 10;
+  ctx.beginPath();
+  ctx.moveTo(x(0), y(0));
+  for (let i = 0; i < vals.length; i++) ctx.lineTo(x(i), y(vals[i]));
+  ctx.stroke();
+  ctx.restore();
+
+  // One dot per closed trade: green = win, red = loss.
+  for (let i = 1; i < vals.length; i++) {
+    const win = pts[i - 1].pnl > 0;
+    ctx.beginPath();
+    ctx.fillStyle = win ? C.green : C.red;
+    ctx.arc(x(i), y(vals[i]), 2.6, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  labelBox(ctx, fmtUsd(last, true), w - padR + 4, y(last), up ? C.lime : C.red, '#06120c');
+}
+
+function renderDaily(p) {
+  const canvas = $('#dailyChart');
+  const { ctx, w, h } = prepCanvas(canvas);
+  const days = p.daily;
+  const best = p.bestDay;
+  const worst = p.worstDay;
+  $('#dailySub').textContent = best
+    ? `best ${best.day.slice(5)} ${fmtUsd(best.pnl, true)} · worst ${worst.day.slice(5)} ${fmtUsd(worst.pnl, true)}`
+    : 'No closed trades in the last 30 days';
+  const padL = 10, padR = 62, padT = 14, padB = 22;
+  const plotW = w - padL - padR;
+  const plotH = h - padT - padB;
+  const vals = days.map((d) => d.pnl);
+  const maxAbs = Math.max(1e-9, ...vals.map((v) => Math.abs(v)));
+  const y = (v) => padT + plotH / 2 - (v / maxAbs) * (plotH / 2) * 0.9;
+  hLine(ctx, padL, w - padR, y(0), 'rgba(230,235,255,0.35)', [4, 3], 1);
+  text(ctx, '0', w - padR + 6, y(0), C.muted, 10);
+  text(ctx, fmtUsd(maxAbs, true).replace('$', ''), w - padR + 6, padT + 4, C.muted, 10);
+  const slot = plotW / days.length;
+  const bw = Math.max(3, Math.min(18, slot * 0.66));
+  days.forEach((d, i) => {
+    const cx = padL + slot * (i + 0.5);
+    if (d.trades === 0) {
+      hLine(ctx, cx - bw / 2, cx + bw / 2, y(0), 'rgba(139,149,196,0.35)', [], 2);
+      return;
+    }
+    const top = Math.min(y(0), y(d.pnl));
+    const height = Math.max(2, Math.abs(y(d.pnl) - y(0)));
+    const grad = ctx.createLinearGradient(0, top, 0, top + height);
+    if (d.pnl >= 0) {
+      grad.addColorStop(0, C.lime);
+      grad.addColorStop(1, 'rgba(52,211,153,0.55)');
+    } else {
+      grad.addColorStop(0, 'rgba(248,113,113,0.55)');
+      grad.addColorStop(1, C.red);
+    }
+    ctx.fillStyle = grad;
+    roundRect(ctx, cx - bw / 2, top, bw, height, 3);
+    ctx.fill();
+  });
+  for (let i = 0; i < days.length; i += Math.max(1, Math.floor(days.length / 5))) {
+    text(ctx, days[i].day.slice(5), padL + slot * (i + 0.5), h - 9, C.muted, 10, 'center');
+  }
+}
+
+function renderSymbolBars(p) {
+  const el = $('#symBars');
+  if (!p.bySymbol.length) {
+    el.innerHTML = '<div class="empty muted" style="padding:20px">No closed trades yet.</div>';
+    return;
+  }
+  const maxAbs = Math.max(1e-9, ...p.bySymbol.map((r) => Math.abs(r.pnl)));
+  el.innerHTML = p.bySymbol
+    .map((r) => {
+      const pct = (Math.abs(r.pnl) / maxAbs) * 100;
+      const col = r.pnl >= 0 ? C.green : C.red;
+      const wr = r.trades ? ((r.wins / r.trades) * 100).toFixed(0) : '0';
+      return `<div class="sym-row">
+        <span class="sym">${esc(r.symbol)}</span>
+        <div class="track"><div class="fill" style="width:${pct}%;background:linear-gradient(90deg,${col}55,${col})"></div></div>
+        <span class="val" style="color:${col}">${fmtUsd(r.pnl, true)}</span>
+        <span class="muted" style="grid-column:2 / span 2;font-size:11px">${r.trades} trades · ${wr}% win</span>
+      </div>`;
+    })
+    .join('');
+}
+
+function renderRHist(p) {
+  const canvas = $('#rChart');
+  const { ctx, w, h } = prepCanvas(canvas);
+  const bins = p.rHist;
+  const total = bins.reduce((s, b) => s + b.count, 0);
+  if (total === 0) {
+    text(ctx, 'R distribution appears after the first trade closes.', w / 2, h / 2, C.muted, 12, 'center');
+    return;
+  }
+  const padL = 10, padR = 10, padT = 14, padB = 34;
+  const plotW = w - padL - padR;
+  const plotH = h - padT - padB;
+  const maxC = Math.max(1, ...bins.map((b) => b.count));
+  const slot = plotW / bins.length;
+  const bw = slot * 0.62;
+  bins.forEach((b, i) => {
+    const cx = padL + slot * (i + 0.5);
+    const bh = (b.count / maxC) * plotH;
+    const c = i < 3 ? C.red : i === 3 ? C.amber : C.green;
+    if (b.count > 0) {
+      const grad = ctx.createLinearGradient(0, h - padB - bh, 0, h - padB);
+      grad.addColorStop(0, c);
+      grad.addColorStop(1, 'rgba(10,14,30,0.4)');
+      ctx.fillStyle = grad;
+      roundRect(ctx, cx - bw / 2, h - padB - bh, bw, bh, 4);
+      ctx.fill();
+    }
+    text(ctx, String(b.count), cx, h - padB - bh - 9, b.count ? c : C.muted, 11, 'center', 800);
+    text(ctx, b.label, cx, h - 14, C.muted, 9, 'center');
+  });
+  hLine(ctx, padL, w - padR, h - padB, 'rgba(230,235,255,0.25)', [], 1);
+}
+
+function renderBreakdown(s, p) {
+  const el = $('#breakdown');
+  const sides = p.bySide;
+  const total = sides.reduce((a, r) => a + Math.abs(r.pnl), 0) || 1;
+  const sideHtml = sides
+    .map((r) => {
+      const col = r.side === 'LONG' ? C.green : C.pink;
+      const wr = r.trades ? ((r.wins / r.trades) * 100).toFixed(0) : '0';
+      return `<div class="split-row">
+        <div class="head"><span><span class="pill ${r.side === 'LONG' ? 'long' : 'short'}">${r.side}</span> ${r.trades} trades · ${wr}% win</span>
+        <b style="color:${r.pnl >= 0 ? C.green : C.red}">${fmtUsd(r.pnl, true)}</b></div>
+        <div class="track" style="height:10px;border-radius:999px;background:rgba(255,255,255,.07);position:relative;overflow:hidden">
+          <div style="position:absolute;top:0;bottom:0;left:0;width:${(Math.abs(r.pnl) / total) * 100}%;border-radius:999px;background:linear-gradient(90deg,${col}55,${col})"></div>
+        </div>
+      </div>`;
+    })
+    .join('');
+  const ex = p.exitReasons || {};
+  const tp = ex.TAKE_PROFIT || 0;
+  const sl = ex.STOP_LOSS || 0;
+  const other = Object.entries(ex)
+    .filter(([k]) => k !== 'TAKE_PROFIT' && k !== 'STOP_LOSS')
+    .reduce((a, [, v]) => a + v, 0);
+  const closed = tp + sl + other;
+  const tpPct = closed ? (tp / closed) * 100 : 0;
+  el.innerHTML = `${sideHtml}
+    <div class="exit-grid">
+      <div><div class="l">Take profit exits</div><div class="v pos">${tp} <span class="muted" style="font-size:12px">${tpPct.toFixed(0)}%</span></div></div>
+      <div><div class="l">Stop loss exits</div><div class="v neg">${sl}</div></div>
+      <div><div class="l">Other exits</div><div class="v" style="color:${C.amber}">${other}</div></div>
+      <div><div class="l">Avg R per trade</div><div class="v" style="color:${s.stats.avgR >= 0 ? C.green : C.red}">${fmtNum(s.stats.avgR, 2)}R</div></div>
+    </div>
+    <div class="best-worst">
+      <div><div class="muted">Best trade</div><b style="color:${C.green}">${p.bestTrade ? `${esc(p.bestTrade.symbol)} ${fmtUsd(p.bestTrade.pnl, true)}` : '—'}</b></div>
+      <div><div class="muted">Worst trade</div><b style="color:${C.red}">${p.worstTrade ? `${esc(p.worstTrade.symbol)} ${fmtUsd(p.worstTrade.pnl, true)}` : '—'}</b></div>
+    </div>`;
 }
 
 // ---------- tables ----------

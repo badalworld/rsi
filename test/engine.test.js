@@ -114,3 +114,21 @@ test('snapshot exposes the dashboard contract without secrets', async () => {
   }
   assert.ok(snap.status.secondsToNextCandle >= 0 && snap.status.secondsToNextCandle <= 900);
 });
+
+test('PnL analytics: cumulative, daily buckets, symbol split and R histogram', async () => {
+  const { computePnlAnalytics } = await import('../src/snapshot.js');
+  const now = Date.UTC(2026, 9, 12, 12);
+  const trades = [
+    { symbol: 'BTC_USDT', side: 'LONG', pnl: 10, rMultiple: 2, exitReason: 'TAKE_PROFIT', closedAt: now - 1000 },
+    { symbol: 'ETH_USDT', side: 'SHORT', pnl: -5, rMultiple: -1, exitReason: 'STOP_LOSS', closedAt: now - 2000 },
+    { symbol: 'BTC_USDT', side: 'SHORT', pnl: -20, rMultiple: -2.5, exitReason: 'STOP_LOSS', closedAt: now - 2 * 24 * 3600 * 1000 },
+  ];
+  const a = computePnlAnalytics(trades, now);
+  assert.equal(a.cumulative.at(-1).cum, -15);
+  assert.equal(a.daily.length, 30);
+  assert.equal(a.daily.at(-1).pnl, 5, 'today = +10 - 5');
+  assert.equal(a.bySymbol[0].symbol, 'ETH_USDT', 'sorted by pnl desc: ETH -5 beats BTC -10');
+  assert.equal(a.rHist.reduce((s, b) => s + b.count, 0), 3);
+  assert.equal(a.rHist[0].count, 1, '-2.5R lands in the <= -2R bin');
+  assert.equal(a.bestTrade.pnl, 10);
+});
