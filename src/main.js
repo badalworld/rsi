@@ -45,7 +45,8 @@ async function main() {
 
   // Demo only: on a fresh synthetic state, replay past bars so the dashboard has history.
   if (cfg.dataSource === 'synthetic' && cfg.syntheticBackfillBars > 0 && !store.load()) {
-    let t = Date.now() - cfg.syntheticBackfillBars * TIMEFRAME_MS;
+    // Align the fake clock to a bar boundary, otherwise every replayed bar looks stale.
+    let t = Math.floor(Date.now() / TIMEFRAME_MS) * TIMEFRAME_MS - cfg.syntheticBackfillBars * TIMEFRAME_MS;
     engine.now = () => t;
     for (let i = 0; i < cfg.syntheticBackfillBars; i++) {
       await engine.tick();
