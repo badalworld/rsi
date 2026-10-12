@@ -97,7 +97,6 @@ function render() {
   renderAlert(s);
   renderRules(s);
   renderKpis(s);
-  renderRegimes(s);
   renderEquity(s);
   renderPerf(s);
   renderPnl(s);
@@ -190,13 +189,6 @@ function renderKpis(s) {
     .join('');
 }
 
-function regimeClass(status) {
-  return status === 'TRADEABLE' ? 'tradeable' : status === 'CHOPPY' ? 'choppy' : status === 'LOW_VOL' ? 'lowvol' : '';
-}
-function regimeColor(status) {
-  return status === 'TRADEABLE' ? C.green : status === 'CHOPPY' ? C.red : status === 'LOW_VOL' ? C.amber : C.muted;
-}
-
 // ---------- canvas helpers ----------
 function prepCanvas(canvas) {
   const dpr = window.devicePixelRatio || 1;
@@ -252,54 +244,6 @@ function hLine(ctx, x1, x2, y, color, dash = [], width = 1) {
   ctx.lineTo(x2, y);
   ctx.stroke();
   ctx.restore();
-}
-
-// ---------- regime cards ----------
-function meter({ label, value, max, mark, markLabel, color, fmt }) {
-  const pct = isNum(value) ? Math.max(0, Math.min(100, (value / max) * 100)) : 0;
-  const markPct = (mark / max) * 100;
-  return `
-    <div class="meter">
-      <div class="meter-label"><span>${label}</span><span style="color:${color}">${isNum(value) ? fmt(value) : '—'}</span></div>
-      <div class="meter-bar">
-        <div class="meter-fill" style="width:${pct}%;background:linear-gradient(90deg,${color}88,${color})"></div>
-        <div class="meter-mark" style="left:${markPct}%"><span>${markLabel}</span></div>
-      </div>
-    </div>`;
-}
-
-function renderRegimes(s) {
-  $('#regimeList').innerHTML = s.symbols
-    .map((x) => {
-      if (x.status !== 'OK') {
-        return `<div class="regime-card">
-          <div class="rc-head"><span class="rc-sym">${esc(x.symbol)}</span><span class="state-pill ERROR">${x.status}</span></div>
-          <div class="rc-foot"><span>${esc(x.error || '')}</span></div></div>`;
-      }
-      const r = x.regime;
-      const status = r.status;
-      const chopColor = r.chop > s.config.chopMax ? C.red : C.green;
-      const volColor = r.volRatio >= s.config.volRatioMin ? C.green : C.amber;
-      const lastSig = s.signals.find((g) => g.symbol === x.symbol);
-      const sigTxt = lastSig ? `${lastSig.type} ${lastSig.action} · ${ago(lastSig.barT)}` : 'no divergence yet';
-      const chg = isNum(x.change24h) ? `<span style="color:${x.change24h >= 0 ? C.green : C.red}">${fmtPct(x.change24h, true, 2)}</span>` : '';
-      return `
-        <div class="regime-card ${regimeClass(status)}">
-          <div class="rc-head">
-            <span class="rc-sym">${esc(x.symbol)}</span>
-            <span class="state-pill ${status}">${status.replace('_', ' ')}</span>
-          </div>
-          <div class="rc-head" style="margin-top:4px">
-            <span class="rc-price">${fmtPrice(x.price)}</span><span class="rc-price">${chg}</span>
-          </div>
-          ${meter({ label: 'Choppiness (CHOP)', value: r.chop, max: 100, mark: s.config.chopMax, markLabel: `${s.config.chopMax} choppy`, color: chopColor, fmt: (v) => v.toFixed(1) })}
-          ${meter({ label: 'Volatility (ATR ÷ avg)', value: r.volRatio, max: 2, mark: s.config.volRatioMin, markLabel: `${s.config.volRatioMin}×`, color: volColor, fmt: (v) => `${v.toFixed(2)}×` })}
-          <div class="rc-foot"><span>RSI ${fmtNum(x.rsi, 1)}</span><span>${esc(sigTxt)}</span></div>
-          <div class="rc-foot" style="margin-top:4px"><span>${esc(r.reason || '')}</span></div>
-        </div>`;
-    })
-    .join('');
-
 }
 
 // ---------- equity chart ----------
